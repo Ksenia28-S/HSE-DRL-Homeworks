@@ -14,18 +14,18 @@ ENV_NAME = "Walker2DBulletEnv-v0"
 LAMBDA = 0.95
 GAMMA = 0.99
 
-ACTOR_LR = 2e-4
-CRITIC_LR = 1e-4
+ACTOR_LR = 1e-4
+CRITIC_LR = 2e-4
 
 CLIP = 0.2
 ENTROPY_COEF = 1e-2
-BATCHES_PER_UPDATE = 64
-BATCH_SIZE = 64
+BATCHES_PER_UPDATE = 256
+BATCH_SIZE = 256
 
 MIN_TRANSITIONS_PER_UPDATE = 2048
 MIN_EPISODES_PER_UPDATE = 4
 
-ITERATIONS = 1000
+ITERATIONS = 2500
 
     
 def compute_lambda_returns_and_gae(trajectory):
@@ -50,17 +50,32 @@ class Actor(nn.Module):
         super().__init__()
         # Advice: use same log_sigma for all states to improve stability
         # You can do this by defining log_sigma as nn.Parameter(torch.zeros(...))
-        self.model = None
-        self.sigma = None
+        self.model = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ELU(),
+            nn.Linear(256, 256),
+            nn.ELU(),
+            nn.Linear(256, action_dim)
+        )
+        self.sigma = nn.Parameter(torch.zeros(action_dim))
         
     def compute_proba(self, state, action):
         # Returns probability of action according to current policy and distribution of actions
-        return None
+        action_mean = self.model(state)
+        action_sigma = torch.exp(self.sigma).unsqueeze(0)
+        dist = Normal(action_mean, action_sigma) 
+        action_probs = torch.exp(dist.log_prob(action).sum(-1))
+        return action_probs, dist
         
     def act(self, state):
         # Returns an action (with tanh), not-transformed action (without tanh) and distribution of non-transformed actions
         # Remember: agent is not deterministic, sample actions from distribution (e.g. Gaussian)
-        return None
+        action_mean = self.model(state)
+        action_sigma = torch.exp(self.sigma).unsqueeze(0)
+        dist = Normal(action_mean, action_sigma) 
+        action_sample = dist.sample()
+        action = torch.tanh(action_sample)
+        return action, action_sample, dist 
         
         
 class Critic(nn.Module):
@@ -107,6 +122,16 @@ class PPO:
             # TODO: Update actor here            
             # TODO: Update critic here
             
+            newp, dist = self.actor.compute_proba(s, a)
+            CLIP_adv = torch.clip(adv, 1 - CLIP, 1 + CLIP) * adv
+            loss_actor = -torch.min((newp / op) * adv, CLIP_adv).mean() - ENTROPY_COEF * dist.entropy().mean()
+            self.actor_optim.zero_grad()
+            loss_actor.backward()
+            self.actor_optim.step()
+            loss_critic = F.mse_loss(self.critic.get_value(s).view(-1), v)
+            self.critic_optim.zero_grad()
+            loss_critic.backward()
+            self.critic_optim.step()
             
     def get_value(self, state):
         with torch.no_grad():
@@ -151,7 +176,13 @@ def sample_episode(env, agent):
         s = ns
     return compute_lambda_returns_and_gae(trajectory)
 
+def set_seed(seed):
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+
 if __name__ == "__main__":
+    set_seed(42)
     env = make(ENV_NAME)
     ppo = PPO(state_dim=env.observation_space.shape[0], action_dim=env.action_space.shape[0])
     state = env.reset()
