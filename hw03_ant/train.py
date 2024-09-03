@@ -13,10 +13,11 @@ GAMMA = 0.99
 TAU = 0.002
 CRITIC_LR = 5e-4
 ACTOR_LR = 2e-4
-DEVICE = "cuda"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 128
 ENV_NAME = "AntBulletEnv-v0"
-TRANSITIONS = 1000000
+TRANSITIONS = 2000000
+EPS = 0.2
 
 def soft_update(target, source):
     for tp, sp in zip(target.parameters(), source.parameters()):
@@ -67,6 +68,7 @@ class TD3:
         self.target_critic_1 = copy.deepcopy(self.critic_1)
         self.target_critic_2 = copy.deepcopy(self.critic_2)
         
+        self.criterion = nn.MSELoss()
         self.replay_buffer = deque(maxlen=200000)
 
     def update(self, transition):
@@ -86,6 +88,24 @@ class TD3:
             
             # Update actor
             
+            with torch.no_grad():
+                next_action = (self.target_actor(next_state) + (torch.randn_like(action) * EPS).clamp(-1, 1)).clamp(-1, 1)
+                Q1_next, Q2_next = self.target_critic_1(next_state, next_action), self.target_critic_2(next_state, next_action)
+                Q_targ = GAMMA * (1 - done) * torch.min(Q1_next, Q2_next) + reward
+
+            Q1, Q2 = self.critic_1(state, action), self.critic_2(state, action)
+            loss = self.criterion(Q1, Q_targ) + self.criterion(Q2, Q_targ)
+            
+            self.critic_1_optim.zero_grad()
+            self.critic_2_optim.zero_grad()
+            loss.backward()
+            self.critic_1_optim.step()
+            self.critic_2_optim.step()
+            policy_loss = -self.critic_1(state, self.actor(state)).mean()
+            self.actor_optim.zero_grad()
+            policy_loss.backward()
+            self.actor_optim.step()
+
             soft_update(self.target_critic_1, self.critic_1)
             soft_update(self.target_critic_2, self.critic_2)
             soft_update(self.target_actor, self.actor)
@@ -96,7 +116,7 @@ class TD3:
             return self.actor(state).cpu().numpy()[0]
 
     def save(self):
-        torch.save(self.actor, "agent.pkl")
+        torch.save(self.actor.state_dict(), "agent.pkl")
 
 
 def evaluate_policy(env, agent, episodes=5):
@@ -111,22 +131,28 @@ def evaluate_policy(env, agent, episodes=5):
             total_reward += reward
         returns.append(total_reward)
     return returns
+    
+def set_seed(seed):
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+
 
 if __name__ == "__main__":
+    set_seed(42)
     env = make(ENV_NAME)
     test_env = make(ENV_NAME)
     td3 = TD3(state_dim=env.observation_space.shape[0], action_dim=env.action_space.shape[0])
     state = env.reset()
     episodes_sampled = 0
     steps_sampled = 0
-    eps = 0.2
     
     for i in range(TRANSITIONS):
         steps = 0
         
         #Epsilon-greedy policy
         action = td3.act(state)
-        action = np.clip(action + eps * np.random.randn(*action.shape), -1, +1)
+        action = np.clip(action + EPS * np.random.randn(*action.shape), -1, +1)
 
         next_state, reward, done, _ = env.step(action)
         td3.update((state, action, next_state, reward, done))
